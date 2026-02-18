@@ -4,130 +4,182 @@ import pandas as pd
 import numpy as np
 import time
 import os
+import shutil
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-def calcular_moda_numpy(imagen_array):
-    valores, cuentas = np.unique(imagen_array, return_counts=True)
-    indice_maximo = np.argmax(cuentas)
-    return valores[indice_maximo]
+# Configuración
+GUARDAR_DEBUG = False # Ponlo en False para que corra rápido
+CARPETA_DEBUG = "debug_recortes"
+
+def limpiar_carpeta_debug():
+    if os.path.exists(CARPETA_DEBUG):
+        shutil.rmtree(CARPETA_DEBUG)
+    os.makedirs(CARPETA_DEBUG)
+
+def segmentar_hoja_lab(img_bgr):
+    # Segmentación basada en el canal A de LAB (Verde vs Rojo/Magenta)
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    _, mask = cv2.threshold(a, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = np.ones((3,3), np.uint8) # Kernel más pequeño para no perder detalles
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    return mask, l, a, b # Devolvemos los canales separados
+
+def obtener_momentos_hu(mask):
+    momentos = cv2.moments(mask)
+    hu = cv2.HuMoments(momentos).flatten()
+    processed_hu = []
+    for val in hu:
+        if val != 0:
+            processed_hu.append(-1 * np.sign(val) * np.log10(abs(val)))
+        else:
+            processed_hu.append(0)
+    return processed_hu
+
+def obtener_datos_geometricos(mask):
+    # Encuentra el contorno más grande (la hoja)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0, 0, 0, 0
+    
+    cnt = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(cnt)
+    perimetro = cv2.arcLength(cnt, True)
+    
+    # 1. Compacidad (Compactness): Relación área/perímetro^2 (Círculo es más compacto)
+    if perimetro == 0: return 0, 0, 0, 0
+    compacidad = (4 * np.pi * area) / (perimetro ** 2)
+    
+    # 2. Rectangularidad y Aspect Ratio
+    x, y, w, h = cv2.boundingRect(cnt)
+    aspect_ratio = float(w) / h
+    rect_area = w * h
+    extent = float(area) / rect_area # Qué tanto llena su caja rectangular
+    
+    # 3. Solidez (Solidity): Área / Área del contorno convexo (sin huecos)
+    hull = cv2.convexHull(cnt)
+    hull_area = cv2.contourArea(hull)
+    solidity = float(area) / hull_area if hull_area > 0 else 0
+    
+    return compacidad, aspect_ratio, extent, solidity
 
 def procesamiento(ruta_origen, clase):
     resultados = []
-    # Verificar si hay imágenes en la ruta
     archivos = glob.glob(ruta_origen)
+    
     if not archivos:
-        print(f"Advertencia: No se encontraron imágenes en {ruta_origen}")
+        print(f"No se encontraron imágenes en: {ruta_origen}")
         return
 
-    for ruta in archivos:
-        img = cv2.imread(ruta, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            continue
+    print(f"Procesando {len(archivos)} imágenes de la clase {clase}...")
+
+    for i, ruta in enumerate(archivos):
+        try:
+            img_color = cv2.imread(ruta)
+            if img_color is None: continue
             
-        re_size = cv2.resize(img, (64,64))
+            # Segmentar y obtener canales individuales
+            mask, l_channel, a_channel, b_channel = segmentar_hoja_lab(img_color)
+            
+            pixels = cv2.countNonZero(mask)
+            if pixels < 500: continue # Basura / Máscara vacía
 
-        h, w = re_size.shape
-        # Cuadrantes
-        q1 = re_size[0:h//2, 0:w//2].mean() # Superior Izquierda
-        q2 = re_size[0:h//2, w//2:w].mean() # Superior Derecha
-        q3 = re_size[h//2:h, 0:w//2].mean() # Inferior Izquierda
-        q4 = re_size[h//2:h, w//2:w].mean() # Inferior Derecha
+            # --- DEBUG ---
+            if GUARDAR_DEBUG and i < 3:
+                cv2.imwrite(f"{CARPETA_DEBUG}/{clase}_{os.path.basename(ruta)}_mask.jpg", mask)
 
-        nueva_mediana = np.median(re_size)
-        nueva_moda = calcular_moda_numpy(re_size)
-        val_max = re_size.max()
-        val_min = re_size.min()
-        des_est = re_size.std()
+            # 1. CARACTERÍSTICAS DE COLOR (Crucial: Canal A y B por separado)
+            # Usamos la máscara para no contar el fondo negro
+            mean_l, std_l = cv2.meanStdDev(l_channel, mask=mask)
+            mean_a, std_a = cv2.meanStdDev(a_channel, mask=mask) # Verde-Rojo
+            mean_b, std_b = cv2.meanStdDev(b_channel, mask=mask) # Azul-Amarillo
+            
+            # 2. CARACTERÍSTICAS DE TEXTURA SIMPLE
+            # Varianza del canal L (Luminosidad) indica rugosidad
+            textura = cv2.Laplacian(l_channel, cv2.CV_64F).var()
 
-        resultados.append([nueva_mediana, nueva_moda, val_max, val_min, des_est, q1, q2, q3, q4, clase])
+            # 3. CARACTERÍSTICAS GEOMÉTRICAS (Físicas)
+            compacidad, aspect_ratio, extent, solidity = obtener_datos_geometricos(mask)
+
+            # 4. MOMENTOS DE HU (Forma abstracta)
+            hu = obtener_momentos_hu(mask)
+
+            # Armar vector de características (Más robusto)
+            # Flatten() es necesario porque meanStdDev devuelve matrices numpy
+            features = [
+                mean_l.flatten()[0], std_l.flatten()[0],
+                mean_a.flatten()[0], std_a.flatten()[0],
+                mean_b.flatten()[0], std_b.flatten()[0],
+                textura,
+                compacidad, aspect_ratio, extent, solidity
+            ] + hu + [clase]
+            
+            resultados.append(features)
+            
+        except Exception as e:
+            print(f"Error procesando {ruta}: {e}")
 
     if resultados:
         df = pd.DataFrame(resultados)
-        # Guardar en CSV (mode='a' anexa al archivo existente)
         df.to_csv("dataset.CSV", mode='a', index=False, header=False)
-        print(f"Procesadas {len(resultados)} imágenes de la clase {clase}")
 
 def entrenar_svm(ruta_dataset):
-    print("\n--- Iniciando Entrenamiento SVM con Grid Search ---")
-    
-    # 1. Cargar datos
-    if not os.path.exists(ruta_dataset):
-        print("Error: No se encontró el archivo dataset.CSV")
-        return
+    print("\n--- Iniciando Entrenamiento Avanzado ---")
+    if not os.path.exists(ruta_dataset): return
 
     data = pd.read_csv(ruta_dataset, header=None)
-    X = data.iloc[:, :-1].values # Características
-    y = data.iloc[:, -1].values  # Etiquetas
+    data = data.dropna()
+    
+    X = data.iloc[:, :-1].values
+    y = data.iloc[:, -1].values
 
-    print(f"Datos cargados: {X.shape[0]} instancias, {X.shape[1]} características.")
+    print(f"Dimensiones del dataset: {X.shape}") # Deberías ver más columnas ahora
 
-    # 2. Dividir en entrenamiento y prueba
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=8)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-    # 3. ESCALAR DATOS (CRUCIAL para SVM Poly y velocidad)
+    # MinMaxScaler a veces va mejor para características geométricas que StandardScaler
+    # Pero StandardScaler es estándar para SVM. Probemos Standard.
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
 
-    # 4. Definir parámetros para Grid Search
+    # Grid Search agresivo
     param_grid = {
-        'C': [0.1, 1, 10, 100],
-        'gamma': ['scale', 0.1, 0.01],
-        'kernel': ['linear', 'rbf', 'poly','sigmoid'] 
+        'C': [1, 10, 100, 1000], # Probamos valores más altos de regularización
+        'gamma': ['scale', 0.1, 0.01, 0.001],
+        'kernel': ['rbf'] # RBF es el rey casi siempre en estos datos
     }
 
-    # 5. Configurar y ejecutar Grid Search
-    # n_jobs=-1 usa todos los núcleos del procesador
-    grid = GridSearchCV(SVC(), param_grid, refit=True, verbose=1, cv=5, n_jobs=-1)
-    
-    print("Buscando los mejores hiperparámetros...")
+    grid = GridSearchCV(SVC(class_weight='balanced'), param_grid, refit=True, verbose=1, cv=5, n_jobs=-1)
     grid.fit(X_train, y_train)
 
-    # 6. Resultados
-    print(f"\nMejores parámetros encontrados: {grid.best_params_}")
-    print(f"Mejor score en validación: {grid.best_score_:.4f}")
+    print(f"\nMejores parámetros: {grid.best_params_}")
+    print(f"Accuracy en Validación: {grid.best_score_:.4f}")
 
-    # 7. Evaluar el mejor modelo
     best_model = grid.best_estimator_
     y_pred = best_model.predict(X_test)
     
-    print("\nReporte de Clasificación en Test Set:")
+    print("\n--- Reporte Final ---")
     print(classification_report(y_test, y_pred))
-    
-    acc = accuracy_score(y_test, y_pred)
-    print(f"Exactitud del modelo SVM: {acc*100:.2f}%")
-
-    return best_model
+    print("Matriz de Confusión:")
+    print(confusion_matrix(y_test, y_pred))
+    print(f"Exactitud Final: {accuracy_score(y_test, y_pred)*100:.2f}%")
 
 def main(): 
-    start_time = time.perf_counter()
-    
-    # --- LIMPIEZA PREVIA ---
-    # Eliminar dataset previo para evitar datos duplicados
-    if os.path.exists("dataset.CSV"):
-        os.remove("dataset.CSV")
-        print("Archivo 'dataset.CSV' anterior eliminado.")
-    
-    # Procesar imágenes
-    print("Procesando imágenes...")
+    if os.path.exists("dataset.CSV"): os.remove("dataset.CSV")
+    if GUARDAR_DEBUG: limpiar_carpeta_debug()
+
     procesamiento('A/*.JPG','A')
     procesamiento('B/*.JPG','B')
     procesamiento('C/*.JPG','C')
     procesamiento('D/*.JPG','D')
     
-    # Verificar si se creó el dataset
     if os.path.exists("dataset.CSV"):
-        # Entrenar SVM con GridSearch
         entrenar_svm("dataset.CSV")
-    else:
-        print("No se creó el dataset. Revisa las rutas de las imágenes.")
-
-    end_time = time.perf_counter()
-    elapsed = end_time - start_time
-    print(f"\nTiempo total de ejecución: {elapsed:.2f} segundos")
 
 if __name__ == '__main__':
     main()
