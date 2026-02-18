@@ -1,7 +1,6 @@
 import cv2
 import glob
 import pandas as pd
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
@@ -21,7 +20,7 @@ def entrenar_svm(ruta_dataset):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=8)
 
     #Se crea y entrena el modelo SVM
-    svm_model = SVC(kernel='rbf', C=1.0, gamma='auto')  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
+    svm_model = SVC(kernel='linear', C=1.0, gamma=0.01)  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
     #svm_model = SVC(kernel='linear', C=1.0, gamma=0.01)  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
     #gamma='scale' o gamma='auto' = nivel de zoom del SVM
     # C = Controla cuánto cuesta cometer un error.
