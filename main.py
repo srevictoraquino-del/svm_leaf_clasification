@@ -1,17 +1,25 @@
 import cv2
 import glob
 import pandas as pd
-from sklearn.model_selection import train_test_split
+import numpy as np
+import time
+import os
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
-import time
-import numpy as np
+from sklearn.preprocessing import StandardScaler
 
 def entrenar_svm(ruta_dataset):
     # Cargar datos con pandas
     data = pd.read_csv(ruta_dataset, header=None)
     X = data.iloc[:, :-1].values #Píxeles en el eje X
     y = data.iloc[:, -1].values #Etiqueta o clase
+
+    # --- AGREGA ESTE BLOQUE AQUÍ ---
+    # Escalar los datos para que tengan media 0 y desviación estándar 1
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+    # -------------------------------
 
     #Obtiene instancias, píxeles, y número de clases
     #print("Dataset cargado:", X.shape, len(set(y)), "clases")
@@ -20,8 +28,10 @@ def entrenar_svm(ruta_dataset):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=8)
 
     #Se crea y entrena el modelo SVM
-    svm_model = SVC(kernel='linear', C=1.0, gamma=0.01)  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
     #svm_model = SVC(kernel='linear', C=1.0, gamma=0.01)  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
+    #svm_model = SVC(kernel='rbf', C=1.0, gamma=0.01)  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
+    #svm_model = SVC(kernel='poly', C=1.0, gamma='scale')  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
+    svm_model = SVC(kernel='rbf', C=10, gamma='scale')  # kernel: 'linear', 'rbf', 'poly', 'sigmoid'
     #gamma='scale' o gamma='auto' = nivel de zoom del SVM
     # C = Controla cuánto cuesta cometer un error.
     #C: [0.1, 1, 10, 100],
@@ -65,13 +75,6 @@ def procesamiento(ruta_origen, clase):
 
     df = pd.DataFrame(resultados)
     df.to_csv("dataset.CSV", mode='a', index = False, header = False)
-        
-        #print(f"Imagen:{m}")
-        #print("Dimensiones:", re_size.shape)
-
-        #cv2.imshow("Imagen", re_size)
-        #cv2.waitKey(0)
-        #cv2.destroyAllWindows()
 
 def calcular_moda_numpy(imagen_array):
     # valores: los píxeles únicos encontrados
@@ -82,85 +85,6 @@ def calcular_moda_numpy(imagen_array):
     indice_maximo = np.argmax(cuentas)
     
     return valores[indice_maximo]
-
-# def entrenar_knn(ruta_dataset):
-#     # Cargar datos con pandas
-#     data = pd.read_csv(ruta_dataset, header=None)
-#     X = data.iloc[:, :-1].values   #Píxeles en el eje X
-#     y = data.iloc[:, -1].values    #Etiqueta o clase
-    
-#     #Obtiene instancias, píxeles, y número de clases
-#     print("Dataset cargado:", X.shape, len(set(y)), "clases")
-
-#     #Divide los datos en entrenamiento y prueba
-#     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=8)
-
-#     #Se crea y entrena el modelo KNN
-#     knn = KNeighborsClassifier(n_neighbors=6)
-#     knn.fit(X_train, y_train)
-
-#     #Evalua el modelo
-#     y_pred = knn.predict(X_test)
-#     acc = accuracy_score(y_test, y_pred)
-#     print(f"Exactitud del modelo KNN: {acc*100:.2f}%")
-#     return knn
-
-def encontrar_mejor_k(X_train, X_test, y_train, y_test, cov_matrix):
-    best_k = 1
-    max_acc = 0
-    print("Buscando el mejor K (1 a 20)...")
-    
-    for k in range(1, 21):
-        # Entrenamos con un k específico
-        knn = KNeighborsClassifier(
-            n_neighbors=k, 
-            metric='mahalanobis', 
-            metric_params={'V': cov_matrix}
-        )
-        knn.fit(X_train, y_train)
-        
-        # Evaluamos
-        pred = knn.predict(X_test)
-        acc = accuracy_score(y_test, pred)
-        
-        if acc > max_acc:
-            max_acc = acc
-            best_k = k
-            
-    return best_k
-
-def entrenar_knn(ruta_dataset):
-    # Cargar datos con pandas
-    data = pd.read_csv(ruta_dataset, header=None)
-    X = data.iloc[:, :-1].values   
-    y = data.iloc[:, -1].values    
-    
-    print("Dataset cargado:", X.shape, len(set(y)), "clases")
-
-    # Divide los datos en entrenamiento y prueba
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=8)
-
-    # Calcular matriz de covarianza para Mahalanobis
-    cov_matrix = np.cov(X_train, rowvar=False)
-    cov_matrix += np.eye(cov_matrix.shape[0]) * 0.1
-
-    # Llamada a la función de optimización
-    k_optimo = encontrar_mejor_k(X_train, X_test, y_train, y_test, cov_matrix)
-    print(f"El mejor valor de K encontrado es: {k_optimo}")
-
-    # Modelo final con el mejor K
-    knn = KNeighborsClassifier(
-        n_neighbors=k_optimo,
-        metric='mahalanobis',
-        metric_params={'V': cov_matrix}
-    )
-    knn.fit(X_train, y_train)
-
-    # Evaluar el modelo
-    y_pred = knn.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    print(f"Exactitud del modelo KNN (Mahalanobis): {acc*100:.2f}%")
-    return knn
 
 def main(): 
     start_time = time.perf_counter()
